@@ -63,14 +63,30 @@ namespace FileCompare
             foreach (ListViewItem item in lvwLeftDir.Items) item.ForeColor = Color.Black;
             foreach (ListViewItem item in lvwRightDir.Items) item.ForeColor = Color.Black;
 
-            // 2. 왼쪽 리스트를 기준으로 오른쪽과 비교
+            // Determine folder roles by folder names (if possible)
+            string leftName = string.Empty;
+            string rightName = string.Empty;
+            try
+            {
+                string leftFull = Path.GetFullPath(txtLeftDir.Text ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string rightFull = Path.GetFullPath(txtRightDir.Text ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                leftName = Path.GetFileName(leftFull) ?? string.Empty;
+                rightName = Path.GetFileName(rightFull) ?? string.Empty;
+            }
+            catch
+            {
+                // ignore
+            }
+
+            bool leftIsOld = leftName.Equals("old", StringComparison.OrdinalIgnoreCase) && rightName.Equals("new", StringComparison.OrdinalIgnoreCase);
+            bool leftIsNew = leftName.Equals("new", StringComparison.OrdinalIgnoreCase) && rightName.Equals("old", StringComparison.OrdinalIgnoreCase);
+
+            // 2. Compare items present in both lists
             foreach (ListViewItem leftItem in lvwLeftDir.Items)
             {
                 string fileName = leftItem.Text;
-                if (!DateTime.TryParse(leftItem.SubItems[2].Text, out DateTime leftDate))
-                    continue;
 
-                // 오른쪽에서 같은 이름의 파일 찾기
+                // find matching item on right
                 ListViewItem? rightMatch = null;
                 foreach (ListViewItem rightItem in lvwRightDir.Items)
                 {
@@ -83,28 +99,55 @@ namespace FileCompare
 
                 if (rightMatch == null)
                 {
-                    leftItem.ForeColor = Color.Purple; // 왼쪽만 있는 파일 (보라색)
+                    // only on left
+                    leftItem.ForeColor = Color.Purple;
+                    continue;
+                }
+
+                // both exist — compare by date (if possible)
+                if (!DateTime.TryParse(leftItem.SubItems[2].Text, out DateTime leftDate) || !DateTime.TryParse(rightMatch.SubItems[2].Text, out DateTime rightDate))
+                {
+                    // If date parsing fails, fallback to leaving both black
+                    continue;
+                }
+
+                if (leftDate == rightDate)
+                {
+                    // identical
+                    leftItem.ForeColor = Color.Black;
+                    rightMatch.ForeColor = Color.Black;
                 }
                 else
                 {
-                    if (!DateTime.TryParse(rightMatch.SubItems[2].Text, out DateTime rightDate))
-                        continue;
-
-                    if (leftDate > rightDate)
+                    // different: if folder names indicate old/new, color new=red old=gray regardless of which date is newer
+                    if (leftIsNew)
                     {
-                        leftItem.ForeColor = Color.Red;    // 왼쪽이 최신 (빨간색)
-                        rightMatch.ForeColor = Color.Gray; // 오른쪽이 예전 (회색)
+                        leftItem.ForeColor = Color.Red;
+                        rightMatch.ForeColor = Color.Gray;
                     }
-                    else if (leftDate < rightDate)
+                    else if (leftIsOld)
                     {
-                        leftItem.ForeColor = Color.Gray;   // 왼쪽이 예전 (회색)
-                        rightMatch.ForeColor = Color.Red;  // 오른쪽이 최신 (빨간색)
+                        leftItem.ForeColor = Color.Gray;
+                        rightMatch.ForeColor = Color.Red;
                     }
-                    // 날짜가 같으면 검은색 유지
+                    else
+                    {
+                        // fallback: newer = red, older = gray
+                        if (leftDate > rightDate)
+                        {
+                            leftItem.ForeColor = Color.Red;
+                            rightMatch.ForeColor = Color.Gray;
+                        }
+                        else
+                        {
+                            leftItem.ForeColor = Color.Gray;
+                            rightMatch.ForeColor = Color.Red;
+                        }
+                    }
                 }
             }
 
-            // 3. 오른쪽 리스트에만 있는 단독 파일 처리
+            // 3. 오른쪽에만 있는 파일 처리
             foreach (ListViewItem rightItem in lvwRightDir.Items)
             {
                 bool existsInLeft = false;
@@ -116,7 +159,7 @@ namespace FileCompare
                         break;
                     }
                 }
-                if (!existsInLeft) rightItem.ForeColor = Color.Purple; // 보라색
+                if (!existsInLeft) rightItem.ForeColor = Color.Purple;
             }
         }
 
@@ -167,15 +210,79 @@ namespace FileCompare
                 }
             }
         }
+        private void CopyFileWithSafeCheck(string srcPath, string destPath)
+        {
+            try
+            {
+                // 1. 대상 경로에 이미 파일이 있는지 확인
+                if (File.Exists(destPath))
+                {
+                    FileInfo srcFile = new FileInfo(srcPath);
+                    FileInfo destFile = new FileInfo(destPath);
+
+                    // [안전 로직] 원본이 대상보다 더 오래된(Old) 경우만 물어봄
+                    if (srcFile.LastWriteTime < destFile.LastWriteTime)
+                    {
+                        string msg = "대상 폴더의 파일이 더 최신입니다. 그래도 덮어쓰시겠습니까?\n\n" +
+                                     "원본(Old): " + srcFile.LastWriteTime + "\n" +
+                                     "대상(New): " + destFile.LastWriteTime;
+
+                        DialogResult result = MessageBox.Show(msg, "덮어쓰기 경고",
+                                              MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+
+                        if (result == DialogResult.No) return; // '아니오' 누르면 복사 취소
+                    }
+                }
+
+                // 2. 파일 복사 수행 (true는 덮어쓰기 허용을 의미)
+                File.Copy(srcPath, destPath, true);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("복사 중 오류 발생: " + ex.Message);
+            }
+        }
 
         private void btnCopyFromLeft_Click(object sender, EventArgs e)
         {
+            if (lvwLeftDir.SelectedItems.Count == 0) return;
 
+            // per-file confirmation is handled inside CopyFileWithSafeCheck (it asks only when source is older than destination)
+
+            foreach (ListViewItem item in lvwLeftDir.SelectedItems)
+            {
+                // 폴더는 제외하고 파일만 처리 (과제 4단계 전까지)
+                if (item.SubItems[1].Text == "<DIR>") continue;
+
+                string srcPath = Path.Combine(txtLeftDir.Text, item.Text);
+                string destPath = Path.Combine(txtRightDir.Text, item.Text);
+
+                CopyFileWithSafeCheck(srcPath, destPath);
+            }
+
+            // 복사 완료 후 양쪽 리스트 갱신 및 색상 비교 재실행
+            PopulateListView(lvwLeftDir, txtLeftDir.Text);
+            PopulateListView(lvwRightDir, txtRightDir.Text);
+            CompareListViews();
         }
 
         private void btnCopyFromRight_Click(object sender, EventArgs e)
         {
+            if (lvwRightDir.SelectedItems.Count == 0) return;
 
+            foreach (ListViewItem item in lvwRightDir.SelectedItems)
+            {
+                if (item.SubItems[1].Text == "<DIR>") continue;
+
+                string srcPath = Path.Combine(txtRightDir.Text, item.Text);
+                string destPath = Path.Combine(txtLeftDir.Text, item.Text);
+
+                CopyFileWithSafeCheck(srcPath, destPath);
+            }
+
+            PopulateListView(lvwLeftDir, txtLeftDir.Text);
+            PopulateListView(lvwRightDir, txtRightDir.Text);
+            CompareListViews();
         }
     }
 }
