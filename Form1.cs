@@ -103,23 +103,55 @@ namespace FileCompare
                     leftItem.ForeColor = Color.Purple;
                     continue;
                 }
+                // both exist — handle directories and files
+                bool leftIsDir = leftItem.SubItems.Count > 1 && leftItem.SubItems[1].Text == "<DIR>";
+                bool rightIsDir = rightMatch.SubItems.Count > 1 && rightMatch.SubItems[1].Text == "<DIR>";
 
-                // both exist — compare by date (if possible)
-                if (!DateTime.TryParse(leftItem.SubItems[2].Text, out DateTime leftDate) || !DateTime.TryParse(rightMatch.SubItems[2].Text, out DateTime rightDate))
+                if (leftIsDir != rightIsDir)
                 {
-                    // If date parsing fails, fallback to leaving both black
+                    // type mismatch (file vs folder) — mark both purple
+                    leftItem.ForeColor = Color.Purple;
+                    rightMatch.ForeColor = Color.Purple;
                     continue;
                 }
 
-                if (leftDate == rightDate)
+                DateTime? leftDate = null;
+                DateTime? rightDate = null;
+
+                if (leftIsDir && rightIsDir)
                 {
-                    // identical
+                    // get latest write time inside each directory recursively
+                    try
+                    {
+                        leftDate = GetLatestWriteTimeRecursive(Path.Combine(txtLeftDir.Text ?? string.Empty, fileName));
+                    }
+                    catch { leftDate = null; }
+                    try
+                    {
+                        rightDate = GetLatestWriteTimeRecursive(Path.Combine(txtRightDir.Text ?? string.Empty, fileName));
+                    }
+                    catch { rightDate = null; }
+                }
+                else
+                {
+                    // treat as files: parse displayed date
+                    if (DateTime.TryParse(leftItem.SubItems[2].Text, out DateTime ld)) leftDate = ld;
+                    if (DateTime.TryParse(rightMatch.SubItems[2].Text, out DateTime rd)) rightDate = rd;
+                }
+
+                if (!leftDate.HasValue || !rightDate.HasValue)
+                {
+                    // if dates unavailable, leave black (or you could mark purple)
+                    continue;
+                }
+
+                if (leftDate.Value == rightDate.Value)
+                {
                     leftItem.ForeColor = Color.Black;
                     rightMatch.ForeColor = Color.Black;
                 }
                 else
                 {
-                    // different: if folder names indicate old/new, color new=red old=gray regardless of which date is newer
                     if (leftIsNew)
                     {
                         leftItem.ForeColor = Color.Red;
@@ -132,8 +164,7 @@ namespace FileCompare
                     }
                     else
                     {
-                        // fallback: newer = red, older = gray
-                        if (leftDate > rightDate)
+                        if (leftDate.Value > rightDate.Value)
                         {
                             leftItem.ForeColor = Color.Red;
                             rightMatch.ForeColor = Color.Gray;
@@ -164,6 +195,7 @@ namespace FileCompare
         }
 
         public Form1()
+
         {
             InitializeComponent();
         }
@@ -243,6 +275,75 @@ namespace FileCompare
             }
         }
 
+        private void CopyDirectoryRecursive(string sourceDir, string destDir, bool promptSubdirs = false)
+        {
+            // 1. 대상 위치에 폴더가 없으면 생성
+            if (!Directory.Exists(destDir))
+            {
+                Directory.CreateDirectory(destDir);
+            }
+
+            // 2. 현재 폴더에 들어있는 모든 파일 복사
+            foreach (string file in Directory.GetFiles(sourceDir))
+            {
+                string fileName = Path.GetFileName(file);
+                string destFile = Path.Combine(destDir, fileName);
+                
+                // 폴더 통째 복사는 양이 많을 수 있으므로 보통 확인창 없이 바로 복사(true)합니다.
+                File.Copy(file, destFile, true);
+            }
+
+            // 3. [재귀의 핵심] 하위 폴더들에 대해 자기 자신을 다시 호출
+            foreach (string subDir in Directory.GetDirectories(sourceDir))
+            {
+                string dirName = Path.GetFileName(subDir);
+                string destSubDir = Path.Combine(destDir, dirName);
+
+                if (promptSubdirs)
+                {
+                    var confirm = MessageBox.Show($"하위 폴더 '{dirName}'을(를) 복사하시겠습니까?", "하위 폴더 복사 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (confirm != DialogResult.Yes)
+                        continue;
+                }
+
+                CopyDirectoryRecursive(subDir, destSubDir, promptSubdirs); // 자기 자신 호출
+            }
+        }
+
+        private DateTime GetLatestWriteTimeRecursive(string dirPath)
+        {
+            DateTime latest = Directory.GetLastWriteTime(dirPath);
+
+            try
+            {
+                foreach (var file in Directory.GetFiles(dirPath))
+                {
+                    try
+                    {
+                        DateTime ft = File.GetLastWriteTime(file);
+                        if (ft > latest) latest = ft;
+                    }
+                    catch { }
+                }
+
+                foreach (var sub in Directory.GetDirectories(dirPath))
+                {
+                    try
+                    {
+                        DateTime subLatest = GetLatestWriteTimeRecursive(sub);
+                        if (subLatest > latest) latest = subLatest;
+                    }
+                    catch { }
+                }
+            }
+            catch
+            {
+                // ignore and return what we have
+            }
+
+            return latest;
+        }
+
         private void btnCopyFromLeft_Click(object sender, EventArgs e)
         {
             if (lvwLeftDir.SelectedItems.Count == 0) return;
@@ -251,13 +352,40 @@ namespace FileCompare
 
             foreach (ListViewItem item in lvwLeftDir.SelectedItems)
             {
-                // 폴더는 제외하고 파일만 처리 (과제 4단계 전까지)
-                if (item.SubItems[1].Text == "<DIR>") continue;
+                // 디렉터리와 파일을 구분하여 처리
+                if (item.SubItems[1].Text == "<DIR>")
+                {
+                    string srcDir = Path.Combine(txtLeftDir.Text, item.Text);
+                    string destDir = Path.Combine(txtRightDir.Text, item.Text);
 
-                string srcPath = Path.Combine(txtLeftDir.Text, item.Text);
-                string destPath = Path.Combine(txtRightDir.Text, item.Text);
+                    // 폴더 복사의 경우 'old' -> 'new'일 때만 확인창 표시
+                    bool promptSubdirs = false;
+                    try
+                    {
+                        string leftFull = Path.GetFullPath(txtLeftDir.Text ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        string rightFull = Path.GetFullPath(txtRightDir.Text ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        string leftName = Path.GetFileName(leftFull) ?? string.Empty;
+                        string rightName = Path.GetFileName(rightFull) ?? string.Empty;
 
-                CopyFileWithSafeCheck(srcPath, destPath);
+                        if (leftName.Equals("old", StringComparison.OrdinalIgnoreCase) && rightName.Equals("new", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var confirm = MessageBox.Show($"폴더 '{item.Text}'을(를) 'old' -> 'new'로 통째로 복사합니다. 계속 진행하시겠습니까?", "폴더 복사 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                            if (confirm != DialogResult.Yes) continue;
+                            promptSubdirs = true;
+                        }
+                    }
+                    catch { }
+
+                    // 실제 복사 수행
+                    CopyDirectoryRecursive(srcDir, destDir, promptSubdirs);
+                }
+                else
+                {
+                    string srcPath = Path.Combine(txtLeftDir.Text, item.Text);
+                    string destPath = Path.Combine(txtRightDir.Text, item.Text);
+
+                    CopyFileWithSafeCheck(srcPath, destPath);
+                }
             }
 
             // 복사 완료 후 양쪽 리스트 갱신 및 색상 비교 재실행
@@ -272,12 +400,38 @@ namespace FileCompare
 
             foreach (ListViewItem item in lvwRightDir.SelectedItems)
             {
-                if (item.SubItems[1].Text == "<DIR>") continue;
+                if (item.SubItems[1].Text == "<DIR>")
+                {
+                    string srcDir = Path.Combine(txtRightDir.Text, item.Text);
+                    string destDir = Path.Combine(txtLeftDir.Text, item.Text);
 
-                string srcPath = Path.Combine(txtRightDir.Text, item.Text);
-                string destPath = Path.Combine(txtLeftDir.Text, item.Text);
+                    bool promptSubdirs = false;
+                    try
+                    {
+                        string leftFull = Path.GetFullPath(txtLeftDir.Text ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        string rightFull = Path.GetFullPath(txtRightDir.Text ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        string leftName = Path.GetFileName(leftFull) ?? string.Empty;
+                        string rightName = Path.GetFileName(rightFull) ?? string.Empty;
 
-                CopyFileWithSafeCheck(srcPath, destPath);
+                        // 복사 방향이 right->left 이므로 확인은 right가 'old'이고 left가 'new'인 경우
+                        if (rightName.Equals("old", StringComparison.OrdinalIgnoreCase) && leftName.Equals("new", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var confirm = MessageBox.Show($"폴더 '{item.Text}'을(를) 'old' -> 'new'로 통째로 복사합니다. 계속 진행하시겠습니까?", "폴더 복사 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                            if (confirm != DialogResult.Yes) continue;
+                            promptSubdirs = true;
+                        }
+                    }
+                    catch { }
+
+                    CopyDirectoryRecursive(srcDir, destDir, promptSubdirs);
+                }
+                else
+                {
+                    string srcPath = Path.Combine(txtRightDir.Text, item.Text);
+                    string destPath = Path.Combine(txtLeftDir.Text, item.Text);
+
+                    CopyFileWithSafeCheck(srcPath, destPath);
+                }
             }
 
             PopulateListView(lvwLeftDir, txtLeftDir.Text);
